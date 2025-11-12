@@ -1,0 +1,12 @@
+column,dtype,binary_variable,min,max,unique_count,sample_values
+HCl_mL,float64,False,0.0,1.0,8,"0.0, 0.2, 0.4, 0.6, 0.8"
+CH3COOH_mL,float64,False,0.0,1.0,8,"1.0, 0.8, 0.6, 0.4, 0.2"
+ZrCl4_mmol,float64,False,0.0,0.1,6,"0.1, 0.08, 0.06, 0.04, 0.02"
+HfCl4_mmol,float64,False,0.0,0.1,6,"0.0, 0.02, 0.04, 0.06, 0.08"
+Water_mL,float64,False,1.5,4.5,3,"1.5, 3.0, 4.5"
+Crystallized,int64,True,0.0,1.0,2,"1, 0"
+FCC_Phase,int64,True,0.0,1.0,2,"1, 0"
+Mesoporous,int64,True,0.0,1.0,2,"0, 1"
+Uniform_Mesoporous,int64,True,0.0,1.0,2,"0, 1"
+Non_Spherical,int64,True,0.0,1.0,2,"0, 1"
+Intensity_Ratio,object,False,0.976,4.154,60,"3.965, 2.725, 2.5955, 3.249, 2.634"
