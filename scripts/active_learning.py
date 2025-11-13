@@ -28,7 +28,7 @@ import argparse
 
 # 导入模型定义
 from model import HierarchicalMOFModel, MOFDataset
-os.chdir("/Users/zian.wangnewsbreak.com/Projects/AI4MOF")
+os.chdir("/Users/wangzian/workspace/AI4S/AI4MOF")
 ############################### 设置参数 ###############################
 
 parser = argparse.ArgumentParser(description='Active Learning for MOF Optimization')
@@ -119,7 +119,15 @@ def oracle(model, dataset, X, device):
     with torch.no_grad():
         binary_pred, regression_pred = model(X_tensor)
         binary_pred = binary_pred.cpu().numpy()
-        regression_pred = regression_pred.cpu().numpy().flatten()
+        regression_pred_scaled = regression_pred.cpu().numpy().flatten()
+    
+    # 回归预测反标准化（统一处理所有样本）
+    if dataset.scaler_y is not None:
+        regression_pred_original = dataset.scaler_y.inverse_transform(
+            regression_pred_scaled.reshape(-1, 1)
+        ).flatten()
+    else:
+        regression_pred_original = regression_pred_scaled
     
     # 计算综合得分
     scores = []
@@ -131,22 +139,20 @@ def oracle(model, dataset, X, device):
         all_binary_high = np.all(binary_probs > 0.5)
         binary_quality = np.prod(binary_probs)  # 所有概率的乘积
         
-        # 回归预测（反标准化）
-        if dataset.scaler_y is not None:
-            reg_value = dataset.scaler_y.inverse_transform([[regression_pred[i]]])[0, 0]
-        else:
-            reg_value = regression_pred[i]
+        # 使用反标准化后的回归值
+        reg_value = regression_pred_original[i]
         
-        # 综合得分：二分类质量 * 回归值（归一化到0-1）
+        # 综合得分：二分类质量 * 回归值
         # 如果二分类不满足，则大幅降低得分
+        reward = 10
         if all_binary_high:
-            score = binary_quality * (reg_value  * 10)  
+            score = binary_quality * (reg_value * reward)  # 奖励回归值
         else:
             score = binary_quality * 0.1  # 惩罚不满足二分类条件的样本
         
         scores.append(score)
     
-    return np.array(scores), binary_pred, regression_pred
+    return np.array(scores), binary_pred, regression_pred_original
 
 ############################### MCTS-based Active Learning Algorithm ###############################
 

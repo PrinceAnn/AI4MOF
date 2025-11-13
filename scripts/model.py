@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 import os
-os.chdir("/Users/zian.wangnewsbreak.com/Projects/AI4MOF")
+os.chdir("/Users/wangzian/workspace/AI4S/AI4MOF")
 # 设置随机种子
 torch.manual_seed(4231)
 np.random.seed(4231)
