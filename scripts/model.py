@@ -6,10 +6,10 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 import os
-os.chdir("/Users/wangzian/workspace/AI4S/AL4MOF/")
+os.chdir("/Users/zian.wangnewsbreak.com/Projects/AI4MOF")
 # 设置随机种子
-torch.manual_seed(42)
-np.random.seed(42)
+torch.manual_seed(4231)
+np.random.seed(4231)
 
 class MOFDataset(Dataset):
     """MOF数据集类"""
@@ -370,8 +370,8 @@ def main():
     
     # 划分数据集 (70% 训练, 15% 验证, 15% 测试)
     total_size = len(dataset)
-    train_size = int(0.7 * total_size)
-    val_size = int(0.15 * total_size)
+    train_size = int(0.8 * total_size)
+    val_size = int(0.1 * total_size)
     test_size = total_size - train_size - val_size
     
     train_dataset, val_dataset, test_dataset = random_split(

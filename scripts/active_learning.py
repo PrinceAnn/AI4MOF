@@ -28,7 +28,7 @@ import argparse
 
 # 导入模型定义
 from model import HierarchicalMOFModel, MOFDataset
-
+os.chdir("/Users/zian.wangnewsbreak.com/Projects/AI4MOF")
 ############################### 设置参数 ###############################
 
 parser = argparse.ArgumentParser(description='Active Learning for MOF Optimization')
@@ -73,11 +73,11 @@ print(f"Using device: {device}")
 def load_model_and_data():
     """加载训练好的模型和数据集"""
     # 加载数据集
-    data_path = "/Users/wangzian/workspace/AI4S/AL4MOF/data/all_data_cleaned.csv"
+    data_path = "data/all_data_cleaned.csv"
     dataset = MOFDataset(data_path)
     
     # 加载模型
-    model_path = "/Users/wangzian/workspace/AI4S/AL4MOF/data/best_model.pth"
+    model_path = "data/best_model.pth"
     # 使用weights_only=False来加载包含sklearn对象的checkpoint
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     
@@ -140,7 +140,7 @@ def oracle(model, dataset, X, device):
         # 综合得分：二分类质量 * 回归值（归一化到0-1）
         # 如果二分类不满足，则大幅降低得分
         if all_binary_high:
-            score = binary_quality * (reg_value / 5.0)  # 假设最大Intensity_Ratio约为5
+            score = binary_quality * (reg_value  * 10)  
         else:
             score = binary_quality * 0.1  # 惩罚不满足二分类条件的样本
         
@@ -218,7 +218,7 @@ class OptTask(_OT):
             # 根据特征范围确定步长
             feature_name = feature_cols[index]
             min_val, max_val = feature_ranges[feature_name]
-            step = (max_val - min_val) * 0.1  # 10%的范围作为步长
+            step = (max_val - min_val) * 0.2  # 20%的范围作为步长
             
             if flip == 0:  # 增加
                 tup[index] += step
@@ -573,7 +573,7 @@ def main():
     global_dataset = dataset
     
     # 加载历史数据
-    data = pd.read_csv("/Users/wangzian/workspace/AI4S/AL4MOF/data/all_data_cleaned.csv")
+    data = pd.read_csv("data/all_data_cleaned.csv")
     X_history = data[feature_cols].values
     
     # 计算历史数据的得分
