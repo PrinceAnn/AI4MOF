@@ -4,12 +4,10 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MaxAbsScaler
 import os
+import argparse
 os.chdir("/Users/wangzian/workspace/AI4S/AI4MOF")
-# 设置随机种子
-torch.manual_seed(4231)
-np.random.seed(4231)
 
 class MOFDataset(Dataset):
     """MOF数据集类"""
@@ -36,14 +34,14 @@ class MOFDataset(Dataset):
         # 创建mask: 只有5个二分类都为1时才有效
         self.regression_mask = (self.y_binary.sum(axis=1) == 5).astype(np.float32)
         
-        # 标准化输入特征
-        self.scaler_X = StandardScaler()
+        # 最大绝对值归一化输入特征
+        self.scaler_X = MaxAbsScaler()
         self.X = self.scaler_X.fit_transform(self.X).astype(np.float32)
         
-        # 标准化回归目标 (只对有效值进行标准化)
+        # 最大绝对值归一化回归目标 (只对有效值进行归一化)
         valid_regression = self.y_regression[self.regression_mask == 1]
         if len(valid_regression) > 0:
-            self.scaler_y = StandardScaler()
+            self.scaler_y = MaxAbsScaler()
             self.scaler_y.fit(valid_regression.reshape(-1, 1))
             self.y_regression_scaled = np.zeros_like(self.y_regression)
             self.y_regression_scaled[self.regression_mask == 1] = self.scaler_y.transform(
@@ -360,12 +358,22 @@ def predict(model, dataset, input_dict, device):
 
 
 def main():
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='Train MOF prediction model')
+    parser.add_argument('--seed', type=int, default=421, help='Random seed for reproducibility')
+    args = parser.parse_args()
+    
+    # 设置随机种子
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    
     # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    print(f"Random seed: {args.seed}")
     
     # 加载数据
-    data_path = "data/all_data_cleaned.csv"
+    data_path = "data/subset_50.csv"
     dataset = MOFDataset(data_path)
     
     # 划分数据集 (70% 训练, 15% 验证, 15% 测试)
@@ -376,7 +384,7 @@ def main():
     
     train_dataset, val_dataset, test_dataset = random_split(
         dataset, [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(42)
+        generator=torch.Generator().manual_seed(args.seed)
     )
     
     # 创建数据加载器
