@@ -1,12 +1,11 @@
 """
-主动学习框架用于MOF材料配比优化
+主动学习框架用于MOF材料配比优化 - 仅回归版本
 
 目标：
-1. 5个二分类变量都为1 (Crystallized, FCC_Phase, Mesoporous, Uniform_Mesoporous, Non_Spherical)
-2. 最大化 Intensity_Ratio
+- 最小化 Intensity_Ratio（寻找低强度比的配方）
 
 策略：
-- 使用训练好的DNN模型作为surrogate model
+- 使用训练好的回归DNN模型作为surrogate model
 - 采用基于MCTS的主动学习算法进行优化
 - 通过exploration和exploitation平衡来寻找最优配比
 """
@@ -27,43 +26,32 @@ import os
 import argparse
 
 # 导入模型定义
-from model import HierarchicalMOFModel, MOFDataset
+from model_regression_only import RegressionOnlyModel, MOFRegressionDataset
 os.chdir("/Users/wangzian/workspace/AI4S/AI4MOF")
+
 ############################### 设置参数 ###############################
 
-parser = argparse.ArgumentParser(description='Active Learning for MOF Optimization')
+parser = argparse.ArgumentParser(description='Active Learning for MOF Optimization - Regression Only')
 parser.add_argument('--iter', type=int, default=1, help='iteration number')
 parser.add_argument('--rollout', type=int, default=100, help='number of rollout steps')
 parser.add_argument('--top_sample', type=int, default=20, help='number of samples to select')
-parser.add_argument('--seed', type=int, default=42, help='random seed for reproducibility')
+parser.add_argument('--minimize', action='store_true', default=False, 
+                    help='minimize Intensity_Ratio (default: False, i.e., maximize)')
 args = parser.parse_args()
 
-# 设置随机种子
-# 更完整的随机种子设置
-def set_all_seeds(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)  # 如果使用多GPU
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    os.environ['PYTHONHASHSEED'] = str(seed)
-
-set_all_seeds(args.seed)
 # 参数设置
 round_num = args.iter
 rollout_round = args.rollout
 top_sample = args.top_sample
-round_name = f'Round{round_num}'
+minimize_target = args.minimize
+round_name = f'Round{round_num}_regression'
 
 # 优化参数
 n_dim = 5  # 5个输入特征
-n_model = 1  # 使用1个模型进行预测
 weight = 0.02  # UCT exploration weight
 list1 = [5, 8, 2, 5, 1, 1]  # [run times, top start points, random start points, top score samples, top visit samples, random samples]
 
-# 输入范围（从column_stats.csv获得）
+# 输入范围
 feature_ranges = {
     "HCl_mL": (0.0, 1.0),
     "CH3COOH_mL": (0.0, 1.0),
@@ -74,7 +62,7 @@ feature_ranges = {
 feature_cols = ["HCl_mL", "CH3COOH_mL", "ZrCl4_mmol", "HfCl4_mmol", "Water_mL"]
 
 # 创建结果文件夹
-model_folder = "Results_AL"
+model_folder = "Results_AL_Regression"
 os.makedirs(model_folder, exist_ok=True)
 os.makedirs(f"{model_folder}/{round_name}", exist_ok=True)
 
@@ -87,15 +75,14 @@ print(f"Using device: {device}")
 def load_model_and_data():
     """加载训练好的模型和数据集"""
     # 加载数据集
-    data_path = "data/subset_50.csv"
-    dataset = MOFDataset(data_path)
+    data_path = "data/low_intensity_filtered.csv"
+    dataset = MOFRegressionDataset(data_path)
     
     # 加载模型
-    model_path = "data/best_model.pth"
-    # 使用weights_only=False来加载包含sklearn对象的checkpoint
+    model_path = "data/best_model_regression_only.pth"
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     
-    model = HierarchicalMOFModel(
+    model = RegressionOnlyModel(
         input_dim=5,
         hidden_dims=[64, 32, 16],
         dropout=0.2
@@ -107,7 +94,7 @@ def load_model_and_data():
 
 ############################### Surrogate Model (Oracle) ###############################
 
-def oracle(model, dataset, X, device):
+def oracle(model, dataset, X, device, minimize=True):
     """
     使用训练好的模型预测
     
@@ -116,11 +103,11 @@ def oracle(model, dataset, X, device):
         dataset: 数据集对象（用于标准化）
         X: 输入样本 shape=(N, 5)
         device: 计算设备
+        minimize: 是否最小化目标（True则返回负值作为score）
     
     Returns:
-        scores: 综合得分（考虑二分类和回归）
-        binary_preds: 二分类预测
-        regression_preds: 回归预测
+        scores: 综合得分
+        regression_preds: 回归预测值（原始尺度）
     """
     if len(X.shape) == 1:
         X = X.reshape(1, -1)
@@ -131,42 +118,25 @@ def oracle(model, dataset, X, device):
     
     # 预测
     with torch.no_grad():
-        binary_pred, regression_pred = model(X_tensor)
-        binary_pred = binary_pred.cpu().numpy()
-        regression_pred_scaled = regression_pred.cpu().numpy().flatten()
+        regression_pred = model(X_tensor).squeeze()
+        regression_pred_scaled = regression_pred.cpu().numpy()
+        if len(regression_pred_scaled.shape) == 0:
+            regression_pred_scaled = np.array([regression_pred_scaled])
     
-    # 回归预测反标准化（统一处理所有样本）
-    if dataset.scaler_y is not None:
-        regression_pred_original = dataset.scaler_y.inverse_transform(
-            regression_pred_scaled.reshape(-1, 1)
-        ).flatten()
+    # 回归预测反标准化
+    regression_pred_original = dataset.scaler_y.inverse_transform(
+        regression_pred_scaled.reshape(-1, 1)
+    ).flatten()
+    
+    # 计算得分
+    if minimize:
+        # 最小化：值越小得分越高，所以取负值
+        scores = -regression_pred_original
     else:
-        regression_pred_original = regression_pred_scaled
+        # 最大化：值越大得分越高
+        scores = regression_pred_original
     
-    # 计算综合得分
-    scores = []
-    for i in range(len(X)):
-        # 二分类预测（0-1之间的概率）
-        binary_probs = binary_pred[i]
-        
-        # 只有当所有二分类预测概率都较高时，才考虑回归值
-        all_binary_high = np.all(binary_probs > 0.5)
-        binary_quality = np.prod(binary_probs)  # 所有概率的乘积
-        
-        # 使用反标准化后的回归值
-        reg_value = regression_pred_original[i]
-        
-        # 综合得分：二分类质量 * 回归值
-        # 如果二分类不满足，则大幅降低得分
-        reward = 1
-        if all_binary_high:
-            score = ((reg_value) * reward)  # 奖励回归值
-        else:
-            score = binary_quality * 0.5  # 惩罚不满足二分类条件的样本
-        
-        scores.append(score)
-    
-    return np.array(scores), binary_pred, regression_pred_original
+    return scores, regression_pred_original
 
 ############################### MCTS-based Active Learning Algorithm ###############################
 
@@ -238,7 +208,7 @@ class OptTask(_OT):
             # 根据特征范围确定步长
             feature_name = feature_cols[index]
             min_val, max_val = feature_ranges[feature_name]
-            step = (max_val - min_val) * 0.2  # 20%的范围作为步长
+            step = (max_val - min_val) * 0.2
             
             if flip == 0:  # 增加
                 tup[index] += step
@@ -273,7 +243,7 @@ class OptTask(_OT):
         
         # 使用oracle评估所有生成的配比
         all_tup = np.array(all_tup)
-        all_values, _, _ = oracle(global_model, global_dataset, all_tup, device)
+        all_values, _ = oracle(global_model, global_dataset, all_tup, device, minimize=minimize_target)
         
         is_terminal = False
         return {OptTask(tuple(t), v, is_terminal) for t, v in zip(all_tup, all_values)}
@@ -302,7 +272,6 @@ def most_visit_node(tree, X, top_n):
     
     for child in children_nodes:
         child_tup = np.array(child.tup)
-        # 检查是否已在X中
         same = np.all(np.abs(child_tup - X) < 1e-6, axis=1)
         has_same = any(same)
         
@@ -332,67 +301,52 @@ def random_node(new_x, n):
 ############################### 单次运行 ###############################
 
 def single_run(X, y, initial_X, initial_y, exploration_weight):
-    """
-    从一个初始点开始进行MCTS搜索
-    
-    Args:
-        X: 已有的样本
-        y: 已有样本的得分
-        initial_X: 初始搜索点
-        initial_y: 初始点的得分
-        exploration_weight: 探索权重
-    
-    Returns:
-        X_next: 选择的新样本
-    """
-    # 创建初始节点
+    """从一个初始点开始进行MCTS搜索"""
     board = OptTask(tup=tuple(initial_X), value=initial_y, terminal=False)
     tree = ActiveLearningMCTS(exploration_weight=exploration_weight)
     
     boards = []
-    boards_rand = []
     
     # 执行rollout
     for i in tqdm(range(rollout_round), desc="Rollout"):
         tree.do_rollout(board)
-        board, board_rand = tree.choose(board)
+        board, _ = tree.choose(board)
         boards.append(list(board.tup))
-        boards_rand.append(list(board_rand.tup))
     
     # 去重
     boards = np.array(boards)
     boards = np.unique(boards, axis=0)
     
     # 评估所有生成的配比
-    pred_values, _, _ = oracle(global_model, global_dataset, boards, device)
+    pred_scores, pred_values = oracle(global_model, global_dataset, boards, device, minimize=minimize_target)
     
     print(f'Generated {len(boards)} unique candidates')
     
     # 过滤掉已存在的样本
     new_x = []
-    new_pred = []
+    new_pred_scores = []
     
-    for i, j in zip(boards, pred_values):
+    for i, score in zip(boards, pred_scores):
         temp_x = np.array(i)
         same = np.all(np.abs(temp_x - X) < 1e-6, axis=1)
         has_same = any(same)
         
         if not has_same:
-            new_pred.append(j)
+            new_pred_scores.append(score)
             new_x.append(temp_x)
     
     new_x = np.array(new_x) if len(new_x) > 0 else np.array([]).reshape(0, n_dim)
-    new_pred = np.array(new_pred)
+    new_pred_scores = np.array(new_pred_scores)
     
     print(f'Found {len(new_x)} new candidates')
     
     if len(new_x) == 0:
         return np.array([]).reshape(0, n_dim)
     
-    # 选择最优样本
+    # 选择最优样本（基于score，值越大越好）
     top_n = list1[3]
-    actual_top_n = min(top_n, len(new_pred))
-    ind = np.argpartition(new_pred, -actual_top_n)[-actual_top_n:]
+    actual_top_n = min(top_n, len(new_pred_scores))
+    ind = np.argpartition(new_pred_scores, -actual_top_n)[-actual_top_n:]
     top_prediction = new_x[ind]
     
     # 选择访问最多的节点
@@ -414,19 +368,9 @@ def single_run(X, y, initial_X, initial_y, exploration_weight):
 ############################### 主运行函数 ###############################
 
 def run(X, y):
-    """
-    主动学习主循环
-    
-    Args:
-        X: 当前所有样本 shape=(N, 5)
-        y: 当前所有样本的得分 shape=(N,)
-    
-    Returns:
-        top_X: 选择的新样本
-    """
-    # 选择起始点
-    top_select = list1[1]  # 最高得分点数量
-    random_select = list1[2]  # 随机点数量
+    """主动学习主循环"""
+    top_select = list1[1]
+    random_select = list1[2]
     
     # 选择得分最高的点
     actual_top = min(top_select, len(y))
@@ -474,64 +418,15 @@ def run(X, y):
     
     return top_X
 
-############################### 样本选择（基于TSNE和得分） ###############################
+############################### 样本选择 ###############################
 
-def select_final_samples(all_X, sample_X, sample_scores, top_n=20, 
-                        binary_preds_history=None, binary_preds_candidates=None,
-                        filter_valid_only=True):
-    """
-    使用TSNE可视化和多样性选择最终样本
-    
-    Args:
-        all_X: 所有历史样本
-        sample_X: 候选样本
-        sample_scores: 候选样本得分
-        top_n: 选择的样本数量
-        binary_preds_history: 历史样本的二分类预测 (N_history, 5)
-        binary_preds_candidates: 候选样本的二分类预测 (N_candidates, 5)
-        filter_valid_only: 是否只展示5个二分类都>0.5的样本（默认True）
-    
-    Returns:
-        selected_indices: 选择的样本索引
-    """
+def select_final_samples(all_X, sample_X, sample_scores, sample_predictions, top_n=20):
+    """使用TSNE可视化和多样性选择最终样本"""
     if len(sample_X) == 0:
         return np.array([])
     
-    # 如果需要过滤，只保留满足二分类条件的样本
-    if filter_valid_only and binary_preds_history is not None and binary_preds_candidates is not None:
-        # 过滤历史样本：5个二分类都>0.5
-        history_valid_mask = np.all(binary_preds_history > 0.5, axis=1)
-        all_X_filtered = all_X[history_valid_mask]
-        
-        # 过滤候选样本：5个二分类都>0.5
-        candidate_valid_mask = np.all(binary_preds_candidates > 0.5, axis=1)
-        sample_X_filtered = sample_X[candidate_valid_mask]
-        sample_scores_filtered = sample_scores[candidate_valid_mask]
-        
-        # 如果过滤后没有候选样本，返回空
-        if len(sample_X_filtered) == 0:
-            print("Warning: No candidates satisfy all binary conditions (all > 0.5)")
-            return np.array([])
-        
-        print(f"Filtered: {len(all_X_filtered)}/{len(all_X)} historical samples, "
-              f"{len(sample_X_filtered)}/{len(sample_X)} candidate samples")
-        
-        # 使用过滤后的数据
-        all_X_viz = all_X_filtered
-        sample_X_viz = sample_X_filtered
-        sample_scores_viz = sample_scores_filtered
-        
-        # 记录原始索引映射（用于返回）
-        candidate_original_indices = np.where(candidate_valid_mask)[0]
-    else:
-        # 不过滤，使用全部数据
-        all_X_viz = all_X
-        sample_X_viz = sample_X
-        sample_scores_viz = sample_scores
-        candidate_original_indices = np.arange(len(sample_X))
-    
     # 合并数据用于TSNE
-    total = np.vstack([all_X_viz, sample_X_viz])
+    total = np.vstack([all_X, sample_X])
     
     # TSNE降维
     print("Performing TSNE...")
@@ -539,99 +434,70 @@ def select_final_samples(all_X, sample_X, sample_scores, top_n=20,
                 random_state=42, max_iter=1000)
     total_tsne = tsne.fit_transform(total)
     
-    # 计算每个候选样本到历史样本的最小距离（多样性）
-    sample_tsne = total_tsne[len(all_X_viz):]
-    history_tsne = total_tsne[:len(all_X_viz)]
+    sample_tsne = total_tsne[len(all_X):]
+    history_tsne = total_tsne[:len(all_X)]
     
+    # 计算多样性
     sample_dist = []
-    for i in range(len(sample_X_viz)):
+    for i in range(len(sample_X)):
         distances = np.sqrt(np.sum((history_tsne - sample_tsne[i])**2, axis=1))
         min_dist = np.min(distances)
         sample_dist.append(min_dist)
     
     sample_dist = np.array(sample_dist)
     
-    # 归一化距离和得分
+    # 归一化
     dist_normalized = (sample_dist - sample_dist.min()) / (sample_dist.max() - sample_dist.min() + 1e-8)
-    score_normalized = (sample_scores_viz - sample_scores_viz.min()) / (sample_scores_viz.max() - sample_scores_viz.min() + 1e-8)
+    score_normalized = (sample_scores - sample_scores.min()) / (sample_scores.max() - sample_scores.min() + 1e-8)
     
-    # 综合排名：得分高 + 距离远（多样性）
+    # 综合排名
     combined_rank = 0.6 * score_normalized + 0.4 * dist_normalized
     
-    # 选择top-n（基于过滤后的数据）
-    actual_top_n = min(top_n, len(sample_X_viz))
-    ind_filtered = np.argpartition(combined_rank, -actual_top_n)[-actual_top_n:]
-    
-    # 映射回原始索引
-    ind = candidate_original_indices[ind_filtered]
-    
-    # 为了增加颜色区分度，计算基于百分位的颜色映射
-    # 使用对数变换或百分位归一化来增强对比
-    if len(sample_scores_viz) > 0:
-        # 方法1: 使用百分位裁剪极端值，增加中间值的区分度
-        vmin = np.percentile(sample_scores_viz, 0)  # 10%分位数
-        vmax = np.percentile(sample_scores_viz, 100)  # 90%分位数
-        
-        # 方法2: 如果分数都是正数，可以尝试对数变换
-        # 这里我们使用裁剪后的范围来增加对比度
-        print(f"Score range for visualization: [{vmin:.4f}, {vmax:.4f}]")
-        print(f"Full score range: [{sample_scores_viz.min():.4f}, {sample_scores_viz.max():.4f}]")
-    else:
-        vmin, vmax = None, None
+    # 选择top-n
+    actual_top_n = min(top_n, len(sample_X))
+    ind = np.argpartition(combined_rank, -actual_top_n)[-actual_top_n:]
     
     # 可视化
+    vmin = np.percentile(sample_predictions, 10)
+    vmax = np.percentile(sample_predictions, 90)
+    
     plt.figure(figsize=(12, 5))
     
-    # TSNE可视化
+    # TSNE
     plt.subplot(1, 2, 1)
     plt.scatter(history_tsne[:, 0], history_tsne[:, 1], 
-                c='black', alpha=0.5, label='Historical data', s=30)
-    # 使用更有区分度的colormap: 'plasma', 'inferno', 'turbo' 都比 'viridis' 更鲜明
+                c='black', alpha=0.5, label='Historical', s=30)
     sc1 = plt.scatter(sample_tsne[:, 0], sample_tsne[:, 1], 
-                     c=sample_scores_viz, cmap='plasma', alpha=0.7, 
-                     label='Candidates', s=50, vmin=vmin, vmax=vmax, edgecolors='white', linewidths=0.5)
-    plt.scatter(sample_tsne[ind_filtered, 0], sample_tsne[ind_filtered, 1], 
+                     c=sample_predictions, cmap='plasma', alpha=0.7, 
+                     s=50, vmin=vmin, vmax=vmax, edgecolors='white', linewidths=0.5)
+    plt.scatter(sample_tsne[ind, 0], sample_tsne[ind, 1], 
                 c='red', marker='*', s=300, edgecolor='black', linewidths=2,
                 label='Selected', zorder=5)
-    plt.colorbar(sc1, label='Score')
-    filter_status = ' (Valid Only)' if filter_valid_only else ' (All)'
-    plt.title(f'TSNE Visualization{filter_status}')
+    plt.colorbar(sc1, label='Intensity_Ratio')
+    plt.title('TSNE Visualization')
     plt.legend()
     
-    # PCA可视化
+    # PCA
     plt.subplot(1, 2, 2)
     pca = PCA(n_components=2)
     total_pca = pca.fit_transform(total)
-    history_pca = total_pca[:len(all_X_viz)]
-    sample_pca = total_pca[len(all_X_viz):]
+    history_pca = total_pca[:len(all_X)]
+    sample_pca = total_pca[len(all_X):]
     
     plt.scatter(history_pca[:, 0], history_pca[:, 1], 
-                c='black', alpha=0.5, label='Historical data', s=30)
+                c='black', alpha=0.5, label='Historical', s=30)
     sc2 = plt.scatter(sample_pca[:, 0], sample_pca[:, 1], 
-                     c=sample_scores_viz, cmap='plasma', alpha=0.7, 
-                     label='Candidates', s=50, vmin=vmin, vmax=vmax, edgecolors='white', linewidths=0.5)
-    plt.scatter(sample_pca[ind_filtered, 0], sample_pca[ind_filtered, 1], 
+                     c=sample_predictions, cmap='plasma', alpha=0.7, 
+                     s=50, vmin=vmin, vmax=vmax, edgecolors='white', linewidths=0.5)
+    plt.scatter(sample_pca[ind, 0], sample_pca[ind, 1], 
                 c='red', marker='*', s=300, edgecolor='black', linewidths=2,
                 label='Selected', zorder=5)
-    plt.colorbar(sc2, label='Score')
-    plt.title(f'PCA Visualization{filter_status}')
+    plt.colorbar(sc2, label='Intensity_Ratio')
+    plt.title('PCA Visualization')
     plt.legend()
     
     plt.tight_layout()
     plt.savefig(f'{model_folder}/{round_name}/sample_selection.png', dpi=300)
-    plt.close()
-    
-    # 距离分布
-    plt.figure(figsize=(8, 5))
-    plt.hist(sample_dist, bins=30, color='blue', alpha=0.6, 
-             edgecolor='black', label='All candidates')
-    plt.hist(sample_dist[ind_filtered], bins=15, color='red', alpha=0.7, 
-             edgecolor='black', label='Selected')
-    plt.xlabel('Distance to nearest historical sample')
-    plt.ylabel('Frequency')
-    plt.title(f'Sample Diversity Distribution{filter_status}')
-    plt.legend()
-    plt.savefig(f'{model_folder}/{round_name}/diversity_distribution.png', dpi=300)
     plt.close()
     
     return ind
@@ -642,7 +508,8 @@ def main():
     global global_model, global_dataset
     
     print("="*80)
-    print(f"Active Learning Round {round_num}")
+    print(f"Active Learning Round {round_num} - Regression Only")
+    print(f"Objective: {'Minimize' if minimize_target else 'Maximize'} Intensity_Ratio")
     print("="*80)
     
     # 加载模型和数据
@@ -652,25 +519,22 @@ def main():
     global_dataset = dataset
     
     # 加载历史数据
-    data = pd.read_csv("data/subset_50.csv")
+    data = pd.read_csv("data/low_intensity_filtered.csv", keep_default_na=False, na_values=[''])
     X_history = data[feature_cols].values
     
     # 计算历史数据的得分
     print("\nEvaluating historical data...")
-    y_history, binary_preds, regression_preds = oracle(model, dataset, X_history, device)
+    y_history, regression_preds = oracle(model, dataset, X_history, device, minimize=minimize_target)
     
     print(f"\nHistorical data statistics:")
     print(f"  Total samples: {len(X_history)}")
+    print(f"  Intensity_Ratio range: [{regression_preds.min():.4f}, {regression_preds.max():.4f}]")
     print(f"  Score range: [{y_history.min():.4f}, {y_history.max():.4f}]")
-    print(f"  Mean score: {y_history.mean():.4f}")
     
-    # 保存历史数据评估结果
+    # 保存历史数据评估
     history_results = pd.DataFrame(X_history, columns=feature_cols)
-    history_results['score'] = y_history
-    for i, col in enumerate(["Crystallized", "FCC_Phase", "Mesoporous", 
-                              "Uniform_Mesoporous", "Non_Spherical"]):
-        history_results[f'{col}_prob'] = binary_preds[:, i]
     history_results['intensity_ratio_pred'] = regression_preds
+    history_results['score'] = y_history
     history_results.to_csv(f'{model_folder}/{round_name}/history_evaluation.csv', index=False)
     
     # 运行主动学习
@@ -694,7 +558,6 @@ def main():
     # 合并所有候选样本
     if len(all_candidates) > 0:
         all_candidates = np.vstack(all_candidates)
-        # 去重
         all_candidates = np.unique(all_candidates, axis=0)
         print(f"\nTotal unique candidates: {len(all_candidates)}")
     else:
@@ -703,45 +566,38 @@ def main():
     
     # 评估所有候选样本
     print("\nEvaluating all candidates...")
-    candidate_scores, candidate_binary, candidate_regression = oracle(
-        model, dataset, all_candidates, device
+    candidate_scores, candidate_predictions = oracle(
+        model, dataset, all_candidates, device, minimize=minimize_target
     )
     
+    print(f"Candidate Intensity_Ratio range: [{candidate_predictions.min():.4f}, {candidate_predictions.max():.4f}]")
     print(f"Candidate score range: [{candidate_scores.min():.4f}, {candidate_scores.max():.4f}]")
-    print(f"Candidate mean score: {candidate_scores.mean():.4f}")
     
-    # 选择最终样本（传递二分类预测，启用过滤）
+    # 选择最终样本
     print(f"\nSelecting top {top_sample} samples...")
     selected_ind = select_final_samples(
         X_history, all_candidates, 
-        candidate_scores, top_n=top_sample,
-        binary_preds_history=binary_preds,
-        binary_preds_candidates=candidate_binary,
-        filter_valid_only=True  # 默认True，只展示满足二分类条件的样本
+        candidate_scores, candidate_predictions,
+        top_n=top_sample
     )
     
     selected_samples = all_candidates[selected_ind]
     selected_scores = candidate_scores[selected_ind]
+    selected_predictions = candidate_predictions[selected_ind]
     
     # 保存结果
     print("\nSaving results...")
     
     # 保存所有候选样本
     candidates_df = pd.DataFrame(all_candidates, columns=feature_cols)
+    candidates_df['intensity_ratio_pred'] = candidate_predictions
     candidates_df['score'] = candidate_scores
-    for i, col in enumerate(["Crystallized", "FCC_Phase", "Mesoporous", 
-                              "Uniform_Mesoporous", "Non_Spherical"]):
-        candidates_df[f'{col}_prob'] = candidate_binary[:, i]
-    candidates_df['intensity_ratio_pred'] = candidate_regression
     candidates_df.to_csv(f'{model_folder}/{round_name}/all_candidates.csv', index=False)
     
     # 保存选择的样本
     selected_df = pd.DataFrame(selected_samples, columns=feature_cols)
+    selected_df['intensity_ratio_pred'] = selected_predictions
     selected_df['score'] = selected_scores
-    for i, col in enumerate(["Crystallized", "FCC_Phase", "Mesoporous", 
-                              "Uniform_Mesoporous", "Non_Spherical"]):
-        selected_df[f'{col}_prob'] = candidate_binary[selected_ind, i]
-    selected_df['intensity_ratio_pred'] = candidate_regression[selected_ind]
     selected_df.to_csv(f'{model_folder}/{round_name}/selected_samples.csv', index=False)
     
     # 打印选择的样本
@@ -750,63 +606,10 @@ def main():
     print("="*80)
     print(selected_df.to_string(index=False))
     
-    # 可视化最优样本
-    visualize_results(X_history, y_history, selected_samples, selected_scores, 
-                     candidate_binary[selected_ind], candidate_regression[selected_ind])
-    
     print(f"\n{'='*80}")
     print(f"Results saved to {model_folder}/{round_name}/")
     print(f"{'='*80}")
 
-def visualize_results(X_history, y_history, selected_X, selected_scores, 
-                     selected_binary, selected_regression):
-    """可视化优化结果"""
-    
-    # 特征分布对比
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    axes = axes.flatten()
-    
-    for i, col in enumerate(feature_cols):
-        ax = axes[i]
-        ax.hist(X_history[:, i], bins=20, alpha=0.5, label='Historical', color='blue')
-        ax.hist(selected_X[:, i], bins=10, alpha=0.7, label='Selected', color='red')
-        ax.set_xlabel(col)
-        ax.set_ylabel('Frequency')
-        ax.set_title(f'{col} Distribution')
-        ax.legend()
-    
-    # 得分对比
-    ax = axes[5]
-    ax.hist(y_history, bins=20, alpha=0.5, label='Historical', color='blue')
-    ax.hist(selected_scores, bins=10, alpha=0.7, label='Selected', color='red')
-    ax.set_xlabel('Score')
-    ax.set_ylabel('Frequency')
-    ax.set_title('Score Distribution')
-    ax.legend()
-    
-    plt.tight_layout()
-    plt.savefig(f'{model_folder}/{round_name}/feature_distributions.png', dpi=300)
-    plt.close()
-    
-    # 二分类预测可视化
-    binary_cols = ["Crystallized", "FCC_Phase", "Mesoporous", 
-                   "Uniform_Mesoporous", "Non_Spherical"]
-    
-    fig, axes = plt.subplots(1, 5, figsize=(20, 4))
-    for i, (ax, col) in enumerate(zip(axes, binary_cols)):
-        ax.bar(['Selected\nSamples'], [selected_binary[:, i].mean()], 
-               color='green', alpha=0.7)
-        ax.axhline(y=0.5, color='r', linestyle='--', label='Threshold')
-        ax.set_ylim([0, 1])
-        ax.set_ylabel('Average Probability')
-        ax.set_title(col)
-        ax.legend()
-    
-    plt.tight_layout()
-    plt.savefig(f'{model_folder}/{round_name}/binary_predictions.png', dpi=300)
-    plt.close()
-    
-    print("\nVisualization saved!")
 
 if __name__ == "__main__":
     main()
