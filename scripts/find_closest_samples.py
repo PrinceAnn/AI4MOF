@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 import argparse
 import os
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MaxAbsScaler, StandardScaler
 from sklearn.metrics.pairwise import cosine_similarity
 
 def find_closest_samples(all_data_path, subset_path, selected_path, output_path, use_cosine=True):
@@ -63,7 +63,7 @@ def find_closest_samples(all_data_path, subset_path, selected_path, output_path,
     
     # 标准化特征以计算相似度/距离
     print(f"\nStandardizing features for {'cosine similarity' if use_cosine else 'distance'} calculation...")
-    scaler = StandardScaler()
+    scaler = MaxAbsScaler()
     X_remaining_scaled = scaler.fit_transform(X_remaining)
     X_selected_scaled = scaler.transform(X_selected)
     
